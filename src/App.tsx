@@ -10,7 +10,15 @@ import {
   ChevronLeft, ChevronRight, Calendar, Tag, CalendarDays
 } from 'lucide-react'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const API_URL = import.meta.env.VITE_API_URL || ''
+
+let nextLocalId = Date.now()
+function genId(): number { return nextLocalId++ }
+
+function loadLocal<T>(key: string, fallback: T): T {
+  try { const d = localStorage.getItem(key); return d ? JSON.parse(d) : fallback } catch { return fallback }
+}
+function saveLocal<T>(key: string, data: T) { localStorage.setItem(key, JSON.stringify(data)) }
 
 interface Transaction {
   id: number
@@ -76,79 +84,66 @@ function App() {
   const [calMonth, setCalMonth] = useState(now.getMonth())
   const [calYear, setCalYear] = useState(now.getFullYear())
 
-  // Fetch transactions from API
+  const useBackend = API_URL.length > 0
+
+  // Fetch transactions
   const fetchTransactions = useCallback(async () => {
-    try {
-      const res = await fetch(API_URL + '/api/transactions')
-      const data = await res.json()
-      setTransactions(data)
-    } catch { /* silently fail - API might not be running */ }
-  }, [])
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/transactions')
+        const data = await res.json()
+        setTransactions(data)
+        return
+      } catch { /* fall through to localStorage */ }
+    }
+    setTransactions(loadLocal<Transaction[]>('financeiro_transactions', []))
+  }, [useBackend])
 
-  // Fetch categories from API
+  // Fetch categories
   const fetchCategories = useCallback(async () => {
-    try {
-      const res = await fetch(API_URL + '/api/categories')
-      const data = await res.json()
-      setIncomeCategories(data.income || DEFAULT_INCOME_CATEGORIES)
-      setExpenseCategories(data.expense || DEFAULT_EXPENSE_CATEGORIES)
-      const customs: CustomCategoryItem[] = []
-      if (data.customIncome) {
-        for (const c of data.customIncome) customs.push(c)
-      }
-      if (data.customExpense) {
-        for (const c of data.customExpense) customs.push(c)
-      }
-      setCustomCategoryItems(customs)
-    } catch { /* silently fail */ }
-  }, [])
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/categories')
+        const data = await res.json()
+        setIncomeCategories(data.income || DEFAULT_INCOME_CATEGORIES)
+        setExpenseCategories(data.expense || DEFAULT_EXPENSE_CATEGORIES)
+        const customs: CustomCategoryItem[] = []
+        if (data.customIncome) { for (const c of data.customIncome) customs.push(c) }
+        if (data.customExpense) { for (const c of data.customExpense) customs.push(c) }
+        setCustomCategoryItems(customs)
+        return
+      } catch { /* fall through to localStorage */ }
+    }
+    const local = loadLocal<{income: string[], expense: string[]}>('financeiro_custom_categories', {income:[], expense:[]})
+    setIncomeCategories([...DEFAULT_INCOME_CATEGORIES, ...local.income])
+    setExpenseCategories([...DEFAULT_EXPENSE_CATEGORIES, ...local.expense])
+    setCustomCategoryItems([
+      ...local.income.map((n, i) => ({id: -(i+1), name: n, type: 'income' as const})),
+      ...local.expense.map((n, i) => ({id: -(1000+i), name: n, type: 'expense' as const})),
+    ])
+  }, [useBackend])
 
-  // Fetch dollar rate
+  const parseDollar = (usd: {bid:string,ask:string,high:string,low:string,pctChange:string,create_date:string}) => ({
+    bid: parseFloat(usd.bid).toFixed(2),
+    ask: parseFloat(usd.ask).toFixed(2),
+    high: parseFloat(usd.high).toFixed(2),
+    low: parseFloat(usd.low).toFixed(2),
+    pctChange: usd.pctChange,
+    timestamp: usd.create_date,
+  })
+
   const fetchDollar = async () => {
     setDollarLoading(true)
     try {
-      const res = await fetch(API_URL + '/api/dollar')
-      const data = await res.json()
-      if (data.USDBRL) {
-        const usd = data.USDBRL
-        setDollarRate({
-          bid: parseFloat(usd.bid).toFixed(2),
-          ask: parseFloat(usd.ask).toFixed(2),
-          high: parseFloat(usd.high).toFixed(2),
-          low: parseFloat(usd.low).toFixed(2),
-          pctChange: usd.pctChange,
-          timestamp: usd.create_date,
-        })
-      } else {
-        // Fallback to direct API call
-        const res2 = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
-        const data2 = await res2.json()
-        const usd = data2.USDBRL
-        setDollarRate({
-          bid: parseFloat(usd.bid).toFixed(2),
-          ask: parseFloat(usd.ask).toFixed(2),
-          high: parseFloat(usd.high).toFixed(2),
-          low: parseFloat(usd.low).toFixed(2),
-          pctChange: usd.pctChange,
-          timestamp: usd.create_date,
-        })
-      }
-    } catch {
-      // Final fallback
-      try {
-        const res = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
+      if (useBackend) {
+        const res = await fetch(API_URL + '/api/dollar')
         const data = await res.json()
-        const usd = data.USDBRL
-        setDollarRate({
-          bid: parseFloat(usd.bid).toFixed(2),
-          ask: parseFloat(usd.ask).toFixed(2),
-          high: parseFloat(usd.high).toFixed(2),
-          low: parseFloat(usd.low).toFixed(2),
-          pctChange: usd.pctChange,
-          timestamp: usd.create_date,
-        })
-      } catch { /* silently fail */ }
-    }
+        if (data.USDBRL) { setDollarRate(parseDollar(data.USDBRL)); setDollarLoading(false); return }
+      }
+      const res = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
+      const data = await res.json()
+      setDollarRate(parseDollar(data.USDBRL))
+    } catch { /* silently fail */ }
     setDollarLoading(false)
   }
 
@@ -199,55 +194,67 @@ function App() {
     if (!formDesc.trim() || !formAmount || !formCategory || !formDate) return
     const amount = parseFloat(formAmount)
     if (isNaN(amount) || amount <= 0) return
-    try {
-      const res = await fetch(API_URL + '/api/transactions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: formType, description: formDesc.trim(), amount, category: formCategory, date: formDate })
-      })
-      if (res.ok) {
-        await fetchTransactions()
-        setFormDesc('')
-        setFormAmount('')
-        setFormCategory('')
-      }
-    } catch { /* silently fail */ }
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: formType, description: formDesc.trim(), amount, category: formCategory, date: formDate })
+        })
+        if (res.ok) { await fetchTransactions(); setFormDesc(''); setFormAmount(''); setFormCategory(''); return }
+      } catch { /* fall through */ }
+    }
+    const txn: Transaction = { id: genId(), type: formType, description: formDesc.trim(), amount, category: formCategory, date: formDate }
+    setTransactions(prev => { const next = [txn, ...prev]; saveLocal('financeiro_transactions', next); return next })
+    setFormDesc(''); setFormAmount(''); setFormCategory('')
   }
 
   const handleDelete = async (id: number) => {
-    try {
-      const res = await fetch(API_URL + '/api/transactions/' + id, { method: 'DELETE' })
-      if (res.ok) {
-        setTransactions(prev => prev.filter(t => t.id !== id))
-      }
-    } catch { /* silently fail */ }
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/transactions/' + id, { method: 'DELETE' })
+        if (res.ok) { setTransactions(prev => { const next = prev.filter(t => t.id !== id); return next }); return }
+      } catch { /* fall through */ }
+    }
+    setTransactions(prev => { const next = prev.filter(t => t.id !== id); saveLocal('financeiro_transactions', next); return next })
   }
 
   const handleAddCategory = async () => {
     const name = newCategoryName.trim()
     if (!name) return
-    try {
-      const res = await fetch(API_URL + '/api/categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, type: formType })
-      })
-      if (res.ok) {
-        await fetchCategories()
-        setFormCategory(name)
-        setNewCategoryName('')
-        setShowAddCategory(false)
-      }
-    } catch { /* silently fail */ }
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, type: formType })
+        })
+        if (res.ok) { await fetchCategories(); setFormCategory(name); setNewCategoryName(''); setShowAddCategory(false); return }
+      } catch { /* fall through */ }
+    }
+    const local = loadLocal<{income:string[],expense:string[]}>('financeiro_custom_categories', {income:[],expense:[]})
+    if (formType === 'income') { if (!local.income.includes(name)) local.income.push(name) }
+    else { if (!local.expense.includes(name)) local.expense.push(name) }
+    saveLocal('financeiro_custom_categories', local)
+    await fetchCategories()
+    setFormCategory(name); setNewCategoryName(''); setShowAddCategory(false)
   }
 
   const handleRemoveCustomCategory = async (id: number) => {
-    try {
-      const res = await fetch(API_URL + '/api/categories/' + id, { method: 'DELETE' })
-      if (res.ok) {
-        await fetchCategories()
-      }
-    } catch { /* silently fail */ }
+    if (useBackend) {
+      try {
+        const res = await fetch(API_URL + '/api/categories/' + id, { method: 'DELETE' })
+        if (res.ok) { await fetchCategories(); return }
+      } catch { /* fall through */ }
+    }
+    const item = customCategoryItems.find(c => c.id === id)
+    if (item) {
+      const local = loadLocal<{income:string[],expense:string[]}>('financeiro_custom_categories', {income:[],expense:[]})
+      if (item.type === 'income') local.income = local.income.filter(n => n !== item.name)
+      else local.expense = local.expense.filter(n => n !== item.name)
+      saveLocal('financeiro_custom_categories', local)
+      await fetchCategories()
+    }
   }
 
   const customCategoriesForType = customCategoryItems.filter(c => c.type === formType)
