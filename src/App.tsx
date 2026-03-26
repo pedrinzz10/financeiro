@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import './App.css'
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -10,13 +10,21 @@ import {
   ChevronLeft, ChevronRight, Calendar, Tag, CalendarDays
 } from 'lucide-react'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+
 interface Transaction {
-  id: string
+  id: number
   type: 'income' | 'expense'
   description: string
   amount: number
   category: string
   date: string
+}
+
+interface CustomCategoryItem {
+  id: number
+  name: string
+  type: 'income' | 'expense'
 }
 
 interface DollarRate {
@@ -33,34 +41,8 @@ const DEFAULT_EXPENSE_CATEGORIES = ['Alimentacao', 'Transporte', 'Moradia', 'Sau
 
 const COLORS = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#14b8a6', '#f59e0b', '#ef4444', '#3b82f6', '#10b981', '#ec4899', '#f97316', '#06b6d4']
 
-function loadTransactions(): Transaction[] {
-  try {
-    const data = localStorage.getItem('financeiro_transactions')
-    return data ? JSON.parse(data) : []
-  } catch { return [] }
-}
-
-function saveTransactions(txns: Transaction[]) {
-  localStorage.setItem('financeiro_transactions', JSON.stringify(txns))
-}
-
-function loadCustomCategories(): { income: string[]; expense: string[] } {
-  try {
-    const data = localStorage.getItem('financeiro_custom_categories')
-    return data ? JSON.parse(data) : { income: [], expense: [] }
-  } catch { return { income: [], expense: [] } }
-}
-
-function saveCustomCategories(cats: { income: string[]; expense: string[] }) {
-  localStorage.setItem('financeiro_custom_categories', JSON.stringify(cats))
-}
-
 function formatCurrency(value: number): string {
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-}
-
-function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
 const MONTH_NAMES = ['Janeiro', 'Fevereiro', 'Marco', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
@@ -70,7 +52,7 @@ type Page = 'dashboard' | 'transactions' | 'calendar'
 
 function App() {
   const [page, setPage] = useState<Page>('dashboard')
-  const [transactions, setTransactions] = useState<Transaction[]>(loadTransactions)
+  const [transactions, setTransactions] = useState<Transaction[]>([])
   const [dollarRate, setDollarRate] = useState<DollarRate | null>(null)
   const [dollarLoading, setDollarLoading] = useState(false)
   const [formType, setFormType] = useState<'income' | 'expense'>('expense')
@@ -78,7 +60,9 @@ function App() {
   const [formAmount, setFormAmount] = useState('')
   const [formCategory, setFormCategory] = useState('')
   const [formDate, setFormDate] = useState(() => new Date().toISOString().split('T')[0])
-  const [customCategories, setCustomCategories] = useState(loadCustomCategories)
+  const [customCategoryItems, setCustomCategoryItems] = useState<CustomCategoryItem[]>([])
+  const [incomeCategories, setIncomeCategories] = useState<string[]>(DEFAULT_INCOME_CATEGORIES)
+  const [expenseCategories, setExpenseCategories] = useState<string[]>(DEFAULT_EXPENSE_CATEGORIES)
   const [newCategoryName, setNewCategoryName] = useState('')
   const [showAddCategory, setShowAddCategory] = useState(false)
 
@@ -92,28 +76,89 @@ function App() {
   const [calMonth, setCalMonth] = useState(now.getMonth())
   const [calYear, setCalYear] = useState(now.getFullYear())
 
-  useEffect(() => { saveTransactions(transactions) }, [transactions])
-  useEffect(() => { saveCustomCategories(customCategories) }, [customCategories])
+  // Fetch transactions from API
+  const fetchTransactions = useCallback(async () => {
+    try {
+      const res = await fetch(API_URL + '/api/transactions')
+      const data = await res.json()
+      setTransactions(data)
+    } catch { /* silently fail - API might not be running */ }
+  }, [])
 
+  // Fetch categories from API
+  const fetchCategories = useCallback(async () => {
+    try {
+      const res = await fetch(API_URL + '/api/categories')
+      const data = await res.json()
+      setIncomeCategories(data.income || DEFAULT_INCOME_CATEGORIES)
+      setExpenseCategories(data.expense || DEFAULT_EXPENSE_CATEGORIES)
+      const customs: CustomCategoryItem[] = []
+      if (data.customIncome) {
+        for (const c of data.customIncome) customs.push(c)
+      }
+      if (data.customExpense) {
+        for (const c of data.customExpense) customs.push(c)
+      }
+      setCustomCategoryItems(customs)
+    } catch { /* silently fail */ }
+  }, [])
+
+  // Fetch dollar rate
   const fetchDollar = async () => {
     setDollarLoading(true)
     try {
-      const res = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
+      const res = await fetch(API_URL + '/api/dollar')
       const data = await res.json()
-      const usd = data.USDBRL
-      setDollarRate({
-        bid: parseFloat(usd.bid).toFixed(2),
-        ask: parseFloat(usd.ask).toFixed(2),
-        high: parseFloat(usd.high).toFixed(2),
-        low: parseFloat(usd.low).toFixed(2),
-        pctChange: usd.pctChange,
-        timestamp: usd.create_date,
-      })
-    } catch { /* silently fail */ }
+      if (data.USDBRL) {
+        const usd = data.USDBRL
+        setDollarRate({
+          bid: parseFloat(usd.bid).toFixed(2),
+          ask: parseFloat(usd.ask).toFixed(2),
+          high: parseFloat(usd.high).toFixed(2),
+          low: parseFloat(usd.low).toFixed(2),
+          pctChange: usd.pctChange,
+          timestamp: usd.create_date,
+        })
+      } else {
+        // Fallback to direct API call
+        const res2 = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
+        const data2 = await res2.json()
+        const usd = data2.USDBRL
+        setDollarRate({
+          bid: parseFloat(usd.bid).toFixed(2),
+          ask: parseFloat(usd.ask).toFixed(2),
+          high: parseFloat(usd.high).toFixed(2),
+          low: parseFloat(usd.low).toFixed(2),
+          pctChange: usd.pctChange,
+          timestamp: usd.create_date,
+        })
+      }
+    } catch {
+      // Final fallback
+      try {
+        const res = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')
+        const data = await res.json()
+        const usd = data.USDBRL
+        setDollarRate({
+          bid: parseFloat(usd.bid).toFixed(2),
+          ask: parseFloat(usd.ask).toFixed(2),
+          high: parseFloat(usd.high).toFixed(2),
+          low: parseFloat(usd.low).toFixed(2),
+          pctChange: usd.pctChange,
+          timestamp: usd.create_date,
+        })
+      } catch { /* silently fail */ }
+    }
     setDollarLoading(false)
   }
 
-  useEffect(() => { fetchDollar() }, [])
+  useEffect(() => {
+    fetchTransactions()
+    fetchCategories()
+    fetchDollar()
+  }, [fetchTransactions, fetchCategories])
+
+  const categories = formType === 'income' ? incomeCategories : expenseCategories
 
   // Filtered transactions for dashboard
   const filteredTransactions = useMemo(() => {
@@ -150,45 +195,62 @@ function App() {
     return months
   }, [transactions])
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!formDesc.trim() || !formAmount || !formCategory || !formDate) return
     const amount = parseFloat(formAmount)
     if (isNaN(amount) || amount <= 0) return
-    const txn: Transaction = { id: generateId(), type: formType, description: formDesc.trim(), amount, category: formCategory, date: formDate }
-    setTransactions(prev => [txn, ...prev])
-    setFormDesc('')
-    setFormAmount('')
-    setFormCategory('')
+    try {
+      const res = await fetch(API_URL + '/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: formType, description: formDesc.trim(), amount, category: formCategory, date: formDate })
+      })
+      if (res.ok) {
+        await fetchTransactions()
+        setFormDesc('')
+        setFormAmount('')
+        setFormCategory('')
+      }
+    } catch { /* silently fail */ }
   }
 
-  const handleDelete = (id: string) => { setTransactions(prev => prev.filter(t => t.id !== id)) }
+  const handleDelete = async (id: number) => {
+    try {
+      const res = await fetch(API_URL + '/api/transactions/' + id, { method: 'DELETE' })
+      if (res.ok) {
+        setTransactions(prev => prev.filter(t => t.id !== id))
+      }
+    } catch { /* silently fail */ }
+  }
 
-  const incomeCategories = [...DEFAULT_INCOME_CATEGORIES, ...customCategories.income]
-  const expenseCategories = [...DEFAULT_EXPENSE_CATEGORIES, ...customCategories.expense]
-  const categories = formType === 'income' ? incomeCategories : expenseCategories
-
-  const handleAddCategory = () => {
+  const handleAddCategory = async () => {
     const name = newCategoryName.trim()
     if (!name) return
-    const type = formType
-    if (type === 'income') {
-      if (incomeCategories.includes(name)) return
-      setCustomCategories(prev => ({ ...prev, income: [...prev.income, name] }))
-    } else {
-      if (expenseCategories.includes(name)) return
-      setCustomCategories(prev => ({ ...prev, expense: [...prev.expense, name] }))
-    }
-    setFormCategory(name)
-    setNewCategoryName('')
-    setShowAddCategory(false)
+    try {
+      const res = await fetch(API_URL + '/api/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, type: formType })
+      })
+      if (res.ok) {
+        await fetchCategories()
+        setFormCategory(name)
+        setNewCategoryName('')
+        setShowAddCategory(false)
+      }
+    } catch { /* silently fail */ }
   }
 
-  const handleRemoveCustomCategory = (type: 'income' | 'expense', name: string) => {
-    setCustomCategories(prev => ({
-      ...prev,
-      [type]: prev[type].filter(c => c !== name)
-    }))
+  const handleRemoveCustomCategory = async (id: number) => {
+    try {
+      const res = await fetch(API_URL + '/api/categories/' + id, { method: 'DELETE' })
+      if (res.ok) {
+        await fetchCategories()
+      }
+    } catch { /* silently fail */ }
   }
+
+  const customCategoriesForType = customCategoryItems.filter(c => c.type === formType)
 
   const goToPrevMonth = () => {
     setDashFilterAll(false)
@@ -251,7 +313,7 @@ function App() {
         {page === 'dashboard' ? (
           <DashboardView balance={balance} totalIncome={totalIncome} totalExpense={totalExpense} expenseByCategory={expenseByCategory} monthlyData={monthlyData} transactions={filteredTransactions} dashMonth={dashMonth} dashYear={dashYear} dashFilterAll={dashFilterAll} setDashFilterAll={setDashFilterAll} goToPrevMonth={goToPrevMonth} goToNextMonth={goToNextMonth} />
         ) : page === 'transactions' ? (
-          <TransactionsView formType={formType} setFormType={setFormType} formDesc={formDesc} setFormDesc={setFormDesc} formAmount={formAmount} setFormAmount={setFormAmount} formCategory={formCategory} setFormCategory={setFormCategory} formDate={formDate} setFormDate={setFormDate} categories={categories} handleAdd={handleAdd} transactions={transactions} handleDelete={handleDelete} showAddCategory={showAddCategory} setShowAddCategory={setShowAddCategory} newCategoryName={newCategoryName} setNewCategoryName={setNewCategoryName} handleAddCategory={handleAddCategory} customCategories={customCategories} handleRemoveCustomCategory={handleRemoveCustomCategory} />
+          <TransactionsView formType={formType} setFormType={setFormType} formDesc={formDesc} setFormDesc={setFormDesc} formAmount={formAmount} setFormAmount={setFormAmount} formCategory={formCategory} setFormCategory={setFormCategory} formDate={formDate} setFormDate={setFormDate} categories={categories} handleAdd={handleAdd} transactions={transactions} handleDelete={handleDelete} showAddCategory={showAddCategory} setShowAddCategory={setShowAddCategory} newCategoryName={newCategoryName} setNewCategoryName={setNewCategoryName} handleAddCategory={handleAddCategory} customCategoriesForType={customCategoriesForType} handleRemoveCustomCategory={handleRemoveCustomCategory} />
         ) : (
           <CalendarView transactions={transactions} calMonth={calMonth} calYear={calYear} calPrevMonth={calPrevMonth} calNextMonth={calNextMonth} />
         )}
@@ -343,7 +405,6 @@ function DashboardView({ balance, totalIncome, totalExpense, expenseByCategory, 
 function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMonth }: { transactions: Transaction[]; calMonth: number; calYear: number; calPrevMonth: () => void; calNextMonth: () => void }) {
   const [selectedDay, setSelectedDay] = useState<number | null>(null)
 
-  // Build a map of date -> transactions for this month
   const monthKey = calYear + '-' + String(calMonth + 1).padStart(2, '0')
   const txnsByDay = useMemo(() => {
     const map: Record<number, Transaction[]> = {}
@@ -357,14 +418,12 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
     return map
   }, [transactions, monthKey])
 
-  // Calendar grid generation
   const firstDayOfMonth = new Date(calYear, calMonth, 1).getDay()
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate()
   const today = new Date()
   const isCurrentMonth = today.getFullYear() === calYear && today.getMonth() === calMonth
   const todayDate = today.getDate()
 
-  // Build weeks array
   const weeks: (number | null)[][] = []
   let currentWeek: (number | null)[] = []
   for (let i = 0; i < firstDayOfMonth; i++) {
@@ -382,12 +441,10 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
     weeks.push(currentWeek)
   }
 
-  // Selected day transactions
   const selectedTxns = selectedDay ? (txnsByDay[selectedDay] || []) : []
   const selectedIncome = selectedTxns.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0)
   const selectedExpense = selectedTxns.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0)
 
-  // Monthly totals
   const monthTxns = transactions.filter(t => t.date.startsWith(monthKey))
   const monthIncome = monthTxns.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0)
   const monthExpense = monthTxns.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0)
@@ -406,7 +463,6 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
         </div>
       </div>
 
-      {/* Monthly summary cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-1"><TrendingUp className="text-green-400" size={16} /><span className="text-xs text-gray-400">Entradas do Mes</span></div>
@@ -422,15 +478,12 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
         </div>
       </div>
 
-      {/* Calendar grid */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
-        {/* Weekday headers */}
         <div className="grid grid-cols-7 gap-1 mb-2">
           {WEEKDAY_NAMES.map(d => (
             <div key={d} className="text-center text-xs font-semibold text-gray-500 uppercase py-2">{d}</div>
           ))}
         </div>
-        {/* Weeks */}
         <div className="grid grid-cols-7 gap-1">
           {weeks.flat().map((day, idx) => {
             if (day === null) {
@@ -475,7 +528,6 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
         </div>
       </div>
 
-      {/* Selected day detail */}
       {selectedDay !== null && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
@@ -512,7 +564,7 @@ function CalendarView({ transactions, calMonth, calYear, calPrevMonth, calNextMo
   )
 }
 
-function TransactionsView({ formType, setFormType, formDesc, setFormDesc, formAmount, setFormAmount, formCategory, setFormCategory, formDate, setFormDate, categories, handleAdd, transactions, handleDelete, showAddCategory, setShowAddCategory, newCategoryName, setNewCategoryName, handleAddCategory, customCategories, handleRemoveCustomCategory }: { formType: 'income' | 'expense'; setFormType: (v: 'income' | 'expense') => void; formDesc: string; setFormDesc: (v: string) => void; formAmount: string; setFormAmount: (v: string) => void; formCategory: string; setFormCategory: (v: string) => void; formDate: string; setFormDate: (v: string) => void; categories: string[]; handleAdd: () => void; transactions: Transaction[]; handleDelete: (id: string) => void; showAddCategory: boolean; setShowAddCategory: (v: boolean) => void; newCategoryName: string; setNewCategoryName: (v: string) => void; handleAddCategory: () => void; customCategories: { income: string[]; expense: string[] }; handleRemoveCustomCategory: (type: 'income' | 'expense', name: string) => void }) {
+function TransactionsView({ formType, setFormType, formDesc, setFormDesc, formAmount, setFormAmount, formCategory, setFormCategory, formDate, setFormDate, categories, handleAdd, transactions, handleDelete, showAddCategory, setShowAddCategory, newCategoryName, setNewCategoryName, handleAddCategory, customCategoriesForType, handleRemoveCustomCategory }: { formType: 'income' | 'expense'; setFormType: (v: 'income' | 'expense') => void; formDesc: string; setFormDesc: (v: string) => void; formAmount: string; setFormAmount: (v: string) => void; formCategory: string; setFormCategory: (v: string) => void; formDate: string; setFormDate: (v: string) => void; categories: string[]; handleAdd: () => void; transactions: Transaction[]; handleDelete: (id: number) => void; showAddCategory: boolean; setShowAddCategory: (v: boolean) => void; newCategoryName: string; setNewCategoryName: (v: string) => void; handleAddCategory: () => void; customCategoriesForType: CustomCategoryItem[]; handleRemoveCustomCategory: (id: number) => void }) {
   return (
     <div className="p-8">
       <h1 className="text-2xl font-bold mb-6">Transacoes</h1>
@@ -563,18 +615,22 @@ function TransactionsView({ formType, setFormType, formDesc, setFormDesc, formAm
               <button onClick={handleAddCategory} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors">Criar</button>
               <button onClick={() => { setShowAddCategory(false); setNewCategoryName('') }} className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm transition-colors">Cancelar</button>
             </div>
-            {(customCategories.income.length > 0 || customCategories.expense.length > 0) && (
+            {customCategoriesForType.length > 0 && (
               <div className="mt-3 pt-3 border-t border-gray-700">
                 <p className="text-xs text-gray-500 mb-2">Suas categorias personalizadas:</p>
                 <div className="flex flex-wrap gap-2">
-                  {customCategories[formType].map(c => (
-                    <span key={c} className="inline-flex items-center gap-1 px-2 py-1 bg-gray-700 rounded-md text-xs text-gray-300">
-                      {c}
-                      <button onClick={() => handleRemoveCustomCategory(formType, c)} className="text-gray-500 hover:text-red-400 transition-colors"><X size={12} /></button>
+                  {customCategoriesForType.map(c => (
+                    <span key={c.id} className="inline-flex items-center gap-1 px-2 py-1 bg-gray-700 rounded-md text-xs text-gray-300">
+                      {c.name}
+                      <button onClick={() => handleRemoveCustomCategory(c.id)} className="text-gray-500 hover:text-red-400 transition-colors"><X size={12} /></button>
                     </span>
                   ))}
-                  {customCategories[formType].length === 0 && <span className="text-xs text-gray-600">Nenhuma categoria personalizada para {formType === 'income' ? 'entradas' : 'saidas'}</span>}
                 </div>
+              </div>
+            )}
+            {customCategoriesForType.length === 0 && (
+              <div className="mt-3 pt-3 border-t border-gray-700">
+                <span className="text-xs text-gray-600">Nenhuma categoria personalizada para {formType === 'income' ? 'entradas' : 'saidas'}</span>
               </div>
             )}
           </div>
